@@ -8,6 +8,7 @@ const DEFAULT_CATEGORIES = [
   "Entertainment",
   "Grocery",
   "Personal",
+  "Debt Payments",
 ];
 
 const EMPTY_TRANSACTION = {
@@ -106,6 +107,11 @@ function dateForSelectedMonth(month) {
   return `${month}-01`;
 }
 
+function paymentDateForMonth(month) {
+  const today = new Date().toISOString().slice(0, 10);
+  return today.slice(0, 7) === month ? today : `${month}-01`;
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState("Dashboard");
   const [selectedMonth, setSelectedMonth] = useState(getCurrentMonth);
@@ -174,6 +180,8 @@ export default function App() {
     useState("All");
   const [lastDeleted, setLastDeleted] = useState(null);
   const undoTimeoutRef = useRef(null);
+  const [billPayAmounts, setBillPayAmounts] = useState({});
+  const [debtPayAmounts, setDebtPayAmounts] = useState({});
 
   const categories = [...DEFAULT_CATEGORIES, ...customCategories].filter(
     (category) => !hiddenCategories.includes(category)
@@ -312,22 +320,22 @@ export default function App() {
     ...trendData.map((item) => Math.max(item.income, item.expenses))
   );
 
-  const billsSummary = useMemo(() => {
+    const billsSummary = useMemo(() => {
     const unpaid = recurringBills.filter(
-      (bill) => !getBillPaymentForMonth(bill, selectedMonth)
+      (bill) => getBillRemaining(bill, selectedMonth) > 0
     );
 
-    const paid = recurringBills.filter((bill) =>
-      getBillPaymentForMonth(bill, selectedMonth)
+    const paid = recurringBills.filter(
+      (bill) => getBillRemaining(bill, selectedMonth) === 0
     );
 
-    const unpaidTotal = unpaid.reduce(
-      (sum, bill) => sum + Number(bill.amount),
+    const unpaidTotal = recurringBills.reduce(
+      (sum, bill) => sum + getBillRemaining(bill, selectedMonth),
       0
     );
 
-    const paidTotal = paid.reduce(
-      (sum, bill) => sum + Number(bill.amount),
+    const paidTotal = recurringBills.reduce(
+      (sum, bill) => sum + getBillPaidAmount(bill, selectedMonth),
       0
     );
 
@@ -580,6 +588,10 @@ export default function App() {
             : debt
         )
       );
+
+      if (payload.transaction) {
+        setTransactions((current) => [...current, payload.transaction]);
+      }
     }
 
     if (type === "goal") {
@@ -601,6 +613,20 @@ export default function App() {
 
     if (type === "bill") {
       setRecurringBills((current) => [...current, payload]);
+    }
+
+    if (type === "billPayment") {
+      setRecurringBills((current) =>
+        current.map((bill) =>
+          bill.id === payload.billId
+            ? { ...bill, payments: [...bill.payments, payload.payment] }
+            : bill
+        )
+      );
+
+      if (payload.transaction) {
+        setTransactions((current) => [...current, payload.transaction]);
+      }
     }
 
     if (undoTimeoutRef.current) {
@@ -696,46 +722,92 @@ export default function App() {
     setDebtForm(EMPTY_DEBT);
   }
 
+    function recordDebtPayment(debtId, amount, date) {
+    const debt = debts.find((entry) => entry.id === debtId);
+
+    if (!debt || !amount || amount <= 0) return false;
+
+    const remainingBalance = getRemainingDebt(debt);
+
+    if (Math.round(amount * 100) > Math.round(remainingBalance * 100)) {
+      window.alert(
+        `That payment is more than the remaining balance of ${money(
+          remainingBalance
+        )}.`
+      );
+      return false;
+    }
+
+    const transactionId = makeId();
+
+    setTransactions((current) => [
+      ...current,
+      {
+        id: transactionId,
+        amount,
+        category: "Debt Payments",
+        description: `${debt.name} payment`,
+        date,
+        recurring: false,
+      },
+    ]);
+
+    setDebts((current) =>
+      current.map((entry) =>
+        entry.id === debtId
+          ? {
+              ...entry,
+              payments: [
+                ...entry.payments,
+                { id: makeId(), amount, date, transactionId },
+              ],
+            }
+          : entry
+      )
+    );
+
+    return true;
+  }
+
   function addDebtPayment(event) {
     event.preventDefault();
 
-    const amount = Number(paymentForm.amount);
-
-    if (!paymentForm.debtId || !amount || amount <= 0) return;
-
-    setDebts((current) =>
-      current.map((debt) => {
-        if (debt.id !== paymentForm.debtId) return debt;
-
-        const remainingBalance = getRemainingDebt(debt);
-
-        if (amount > remainingBalance) {
-          window.alert(
-            `That payment is more than the remaining balance of ${money(
-              remainingBalance
-            )}.`
-          );
-          return debt;
-        }
-
-        return {
-          ...debt,
-          payments: [
-            ...debt.payments,
-            {
-              id: makeId(),
-              amount,
-              date: paymentForm.date,
-            },
-          ],
-        };
-      })
+    const saved = recordDebtPayment(
+      paymentForm.debtId,
+      Number(paymentForm.amount),
+      paymentForm.date
     );
+
+    if (!saved) return;
 
     setPaymentForm({
       debtId: "",
       amount: "",
       date: dateForSelectedMonth(selectedMonth),
+    });
+  }
+
+  function payDebtFromCard(debtId) {
+    const debt = debts.find((entry) => entry.id === debtId);
+    if (!debt) return;
+
+    const typed = debtPayAmounts[debtId];
+    const amount = Number(
+      typed === undefined || typed === "" ? getRemainingDebt(debt) : typed
+    );
+
+    const saved = recordDebtPayment(
+      debtId,
+      amount,
+      paymentDateForMonth(selectedMonth)
+    );
+
+    if (!saved) return;
+
+    setDebtPayAmounts((current) => {
+      const next = { ...current };
+      delete next[debtId];
+      return next;
     });
   }
 
@@ -746,9 +818,12 @@ export default function App() {
     scheduleUndo({ type: "debt", payload: debt });
   }
 
-  function deleteDebtPayment(debtId, paymentId) {
+    function deleteDebtPayment(debtId, paymentId) {
     const debt = debts.find((entry) => entry.id === debtId);
     const payment = debt?.payments.find((entry) => entry.id === paymentId);
+    const transaction = payment?.transactionId
+      ? transactions.find((item) => item.id === payment.transactionId)
+      : null;
 
     setDebts((current) =>
       current.map((entry) =>
@@ -763,7 +838,16 @@ export default function App() {
       )
     );
 
-    scheduleUndo({ type: "debtPayment", payload: { debtId, payment } });
+    if (payment?.transactionId) {
+      setTransactions((current) =>
+        current.filter((item) => item.id !== payment.transactionId)
+      );
+    }
+
+    scheduleUndo({
+      type: "debtPayment",
+      payload: { debtId, payment, transaction },
+    });
   }
 
   function getTotalPaid(debt) {
@@ -1038,22 +1122,46 @@ export default function App() {
     return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
   }
 
-  function markBillPaid(billId) {
+    function getBillPaymentsForMonth(bill, month) {
+    return bill.payments.filter((payment) => payment.month === month);
+  }
+
+  function getBillPaidAmount(bill, month) {
+    return getBillPaymentsForMonth(bill, month).reduce(
+      (sum, payment) => sum + Number(payment.amount ?? bill.amount),
+      0
+    );
+  }
+
+  function getBillRemaining(bill, month) {
+    const remaining = Number(bill.amount) - getBillPaidAmount(bill, month);
+    return Math.max(Math.round(remaining * 100) / 100, 0);
+  }
+
+  function payBill(billId) {
     const bill = recurringBills.find((entry) => entry.id === billId);
     if (!bill) return;
 
-    if (getBillPaymentForMonth(bill, selectedMonth)) return;
+    const typed = billPayAmounts[billId];
+    const amount = Number(
+      typed === undefined || typed === ""
+        ? getBillRemaining(bill, selectedMonth)
+        : typed
+    );
 
+    if (!amount || amount <= 0) return;
+
+    const date = paymentDateForMonth(selectedMonth);
     const transactionId = makeId();
 
     setTransactions((current) => [
       ...current,
       {
         id: transactionId,
-        amount: bill.amount,
+        amount,
         category: bill.category,
         description: bill.name,
-        date: dateForSelectedMonth(selectedMonth),
+        date,
         recurring: false,
       },
     ]);
@@ -1068,7 +1176,8 @@ export default function App() {
                 {
                   id: makeId(),
                   month: selectedMonth,
-                  date: dateForSelectedMonth(selectedMonth),
+                  date,
+                  amount,
                   transactionId,
                 },
               ],
@@ -1076,14 +1185,22 @@ export default function App() {
           : entry
       )
     );
+
+    setBillPayAmounts((current) => {
+      const next = { ...current };
+      delete next[billId];
+      return next;
+    });
   }
 
-  function markBillUnpaid(billId) {
+  function removeBillPayment(billId, paymentId) {
     const bill = recurringBills.find((entry) => entry.id === billId);
-    if (!bill) return;
-
-    const payment = getBillPaymentForMonth(bill, selectedMonth);
+    const payment = bill?.payments.find((entry) => entry.id === paymentId);
     if (!payment) return;
+
+    const transaction = transactions.find(
+      (item) => item.id === payment.transactionId
+    );
 
     setTransactions((current) =>
       current.filter((item) => item.id !== payment.transactionId)
@@ -1094,11 +1211,16 @@ export default function App() {
         entry.id === billId
           ? {
               ...entry,
-              payments: entry.payments.filter((p) => p.id !== payment.id),
+              payments: entry.payments.filter((item) => item.id !== paymentId),
             }
           : entry
       )
     );
+
+    scheduleUndo({
+      type: "billPayment",
+      payload: { billId, payment, transaction },
+    });
   }
 
   const navItems = [
@@ -2385,6 +2507,33 @@ export default function App() {
                           {Math.round(paidPercent)}% paid off
                         </span>
 
+                        {remaining > 0 && (
+                          <div className="pay-row">
+                            <input
+                              type="number"
+                              min="0.01"
+                              step="0.01"
+                              placeholder="Payment amount"
+                              aria-label={`Payment amount for ${debt.name}`}
+                              value={debtPayAmounts[debt.id] ?? ""}
+                              onChange={(event) =>
+                                setDebtPayAmounts({
+                                  ...debtPayAmounts,
+                                  [debt.id]: event.target.value,
+                                })
+                              }
+                            />
+
+                            <button
+                              className="primary-button"
+                              type="button"
+                              onClick={() => payDebtFromCard(debt.id)}
+                            >
+                              Pay
+                            </button>
+                          </div>
+                        )}
+
                         <div className="debt-history">
                           <div className="debt-history-header">
                             <strong>Payment history</strong>
@@ -2805,11 +2954,13 @@ export default function App() {
                   </p>
                 ) : (
                   recurringBills.map((bill) => {
-                    const payment = getBillPaymentForMonth(
+                    const monthPayments = getBillPaymentsForMonth(
                       bill,
                       selectedMonth
                     );
-                    const isPaid = Boolean(payment);
+                    const paidAmount = getBillPaidAmount(bill, selectedMonth);
+                    const remaining = getBillRemaining(bill, selectedMonth);
+                    const dueLabel = getDueDateLabel(bill, selectedMonth);
 
                     return (
                       <article
@@ -2842,32 +2993,76 @@ export default function App() {
                         </div>
 
                         <div className="debt-balance-box">
-                          <span>Amount due</span>
-                          <h3>{money(bill.amount)}</h3>
+                          <span>
+                            {remaining === 0 ? "Paid in full" : "Remaining this month"}
+                          </span>
+                          <h3>{money(remaining)}</h3>
                           <p>
-                            {isPaid
-                              ? `Paid on ${payment.date}`
-                              : getDueDateLabel(bill, selectedMonth)
-                              ? `Due ${getDueDateLabel(bill, selectedMonth)} · Not paid yet`
-                              : "Not paid yet this month"}
+                            {money(paidAmount)} paid of {money(bill.amount)}
+                            {dueLabel ? ` · Due ${dueLabel}` : ""}
                           </p>
                         </div>
 
-                        <button
-                          className={
-                            isPaid ? "secondary-button" : "primary-button"
-                          }
-                          type="button"
-                          onClick={() =>
-                            isPaid
-                              ? markBillUnpaid(bill.id)
-                              : markBillPaid(bill.id)
-                          }
-                        >
-                          {isPaid
-                            ? "Mark unpaid"
-                            : `Mark paid for ${getMonthLabel(selectedMonth)}`}
-                        </button>
+                        {remaining > 0 && (
+                          <div className="pay-row">
+                            <input
+                              type="number"
+                              min="0.01"
+                              step="0.01"
+                              aria-label={`Amount to pay toward ${bill.name}`}
+                              value={
+                                billPayAmounts[bill.id] ?? remaining.toFixed(2)
+                              }
+                              onChange={(event) =>
+                                setBillPayAmounts({
+                                  ...billPayAmounts,
+                                  [bill.id]: event.target.value,
+                                })
+                              }
+                            />
+
+                            <button
+                              className="primary-button"
+                              type="button"
+                              onClick={() => payBill(bill.id)}
+                            >
+                              Pay
+                            </button>
+                          </div>
+                        )}
+
+                        {monthPayments.length > 0 && (
+                          <div className="debt-history">
+                            <div className="debt-history-header">
+                              <strong>Payments this month</strong>
+                              <span>{monthPayments.length}</span>
+                            </div>
+
+                            {monthPayments.map((payment) => (
+                              <div
+                                className="debt-payment-row"
+                                key={payment.id}
+                              >
+                                <div>
+                                  <strong>
+                                    {money(payment.amount ?? bill.amount)}
+                                  </strong>
+                                  <span>{payment.date}</span>
+                                </div>
+
+                                <button
+                                  className="icon-button danger"
+                                  onClick={() =>
+                                    removeBillPayment(bill.id, payment.id)
+                                  }
+                                  aria-label="Delete payment"
+                                >
+                                  ×
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </article>
                     );
                   })
