@@ -951,7 +951,7 @@ export default function App() {
           Array.isArray(data.debts);
 
         if (!hasExpectedShape) {
-          window.alert("That file doesn't look like a BrightBudget backup.");
+          window.alert("That file doesn't look like a Better Budget backup.");
           return;
         }
 
@@ -970,7 +970,7 @@ export default function App() {
         setDebts(data.debts);
       } catch (error) {
         window.alert(
-          "Couldn't read that file. Make sure it's a valid BrightBudget export."
+          "Couldn't read that file. Make sure it's a valid Better Budget export."
         );
       }
     };
@@ -1248,7 +1248,7 @@ export default function App() {
           <div className="brand-mark">✦</div>
 
           <div>
-            <h1>BrightBudget</h1>
+            <h1>Better Budget</h1>
             <p>Money made simple</p>
           </div>
         </div>
